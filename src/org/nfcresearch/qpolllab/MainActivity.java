@@ -91,7 +91,8 @@ public final class MainActivity extends Activity {
         chipInfo=text("芯片：尚未检查",15,0xff263e35);page.addView(chipInfo);
         capabilityInfo=text("Q-Poll：尚未测试",15,0xff263e35);page.addView(capabilityInfo);
         page.addView(text("芯片信息来自当前系统配置；能力以实际寻卡命令与控制器响应为准。",12,0xff68766e));
-        section(page,"授权方式");RadioGroup backend=new RadioGroup(this);backend.setOrientation(RadioGroup.HORIZONTAL);
+        if(QPollSupport.detectNativeQFlag()!=0)page.addView(text("已发现 ROM 原生 Q 标志：寻卡和传图使用当前前台页面，无需 Shizuku / Root。下方授权仅用于配置检查和旧厂商路径。",12,0xff52635d));
+        section(page,"配置检查 / 旧路径授权方式");RadioGroup backend=new RadioGroup(this);backend.setOrientation(RadioGroup.HORIZONTAL);
         RadioButton shizuku=new RadioButton(this);shizuku.setId(View.generateViewId());shizuku.setText("Shizuku · 免 Root");backend.addView(shizuku);idleControls.add(shizuku);
         useRoot=new RadioButton(this);useRoot.setId(View.generateViewId());useRoot.setText("Root");backend.addView(useRoot);idleControls.add(useRoot);page.addView(backend);backend.check(shizuku.getId());
         page.addView(action("Shizuku 授权 / 连接",v->connectShizuku()));
@@ -156,10 +157,10 @@ public final class MainActivity extends Activity {
         page.addView(text("0 ms 表示收到应答后立即再次查询，实际频率取决于通信耗时。",12,0xff68766e));
         page.addView(action("恢复默认参数",v->{power.setSelection(2);poll.setSelection(pollTimes.length-1);}));
         Button about=button("参考项目与许可证");about.setOnClickListener(v->showLicense());page.addView(about);
-        page.addView(text("墨水屏刷新测试 · v2.10-test1",12,0xff68766e));
+        page.addView(text("墨水屏刷新测试 · v2.10.1-test1",12,0xff68766e));
         log=text("",11,0xff233c31);log.setTypeface(Typeface.MONOSPACE);log.setTextIsSelectable(true);log.setPadding(dp(10),dp(8),dp(10),dp(8));
         selectPage(getSharedPreferences("refresh-settings",MODE_PRIVATE).getInt("page",0));
-        append("v2.10-test1 就绪；设备测试 / 图像发送 / 高级参数；Shizuku 与 Root 可选。");source=PanelImage.testPattern();originalSource=source;prepare();
+        append("v2.10.1-test1 就绪；优先使用 ROM 原生 Q 标志；Shizuku 与 Root 可选。");source=PanelImage.testPattern();originalSource=source;prepare();
     }
     private void section(LinearLayout page,String title){TextView t=text(title,18,0xff142f2a);t.setTypeface(null,Typeface.BOLD);t.setPadding(0,dp(12),0,dp(6));page.addView(t);}
     private void selectPage(int index){activePage=Math.max(0,Math.min(2,index));for(int i=0;i<3;i++){pageScrolls[i].setVisibility(i==activePage?View.VISIBLE:View.GONE);tabs[i].setTextColor(i==activePage?Color.WHITE:0xff52635d);tabs[i].setBackgroundTintList(android.content.res.ColorStateList.valueOf(i==activePage?0xff176b61:0xffe3eae6));}getSharedPreferences("refresh-settings",MODE_PRIVATE).edit().putInt("page",activePage).apply();}
@@ -222,7 +223,9 @@ public final class MainActivity extends Activity {
     private void start(final String mode){
         if(busy||preparing||editingCrop||!resumed)return;
         final boolean rootMode=useRoot.isChecked();
-        if(!rootMode){try{if(!Shizuku.pingBinder()||Shizuku.checkSelfPermission()!=android.content.pm.PackageManager.PERMISSION_GRANTED){connectShizuku();return;}}catch(Exception e){append("请先连接 Shizuku："+e);return;}}
+        final int nativeQFlag=QPollSupport.detectNativeQFlag();
+        final boolean nativeReader=nativeQFlag!=0&&!mode.equals("inspect");
+        if(!nativeReader&&!rootMode){try{if(!Shizuku.pingBinder()||Shizuku.checkSelfPermission()!=android.content.pm.PackageManager.PERMISSION_GRANTED){connectShizuku();return;}}catch(Exception e){append("请先连接 Shizuku："+e);return;}}
         final int seconds=durations[duration.getSelectedItemPosition()];
         final boolean panel=mode.equals("identity")||mode.equals("refresh");
         if(mode.equals("refresh")&&(prepared==null||prepared.panelType.isEmpty())){append("请先在图像与发送页选择屏幕类型 A0 或 A1。");return;}
@@ -238,11 +241,13 @@ public final class MainActivity extends Activity {
         if(mode.equals("qtag"))capabilityInfo.setText("Q-Poll：测试中，等待实际寻卡命令与响应…");
         stopFile=sessionStop;busy=true;terminal=false;scanning=false;failure.clear();controls();progress.setProgress(0);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        state.setText(rootMode?"等待 Root / NFC":"连接 Shizuku / NFC");detail.setText(rootMode?"请允许 Root 授权。":"使用 Shizuku 授权，无需 Root。");
+        state.setText(nativeReader?"前台原生 NFC":rootMode?"等待 Root / NFC":"连接 Shizuku / NFC");detail.setText(nativeReader?"使用 ROM 原生 Q 入口，无需后台授权；保持手机解锁和应用在前台。":rootMode?"请允许 Root 授权。":"使用 Shizuku 授权，无需 Root。");
         append("──────── "+mode+" · 寻卡 "+seconds+" 秒 ────────");
         final String command="CLASSPATH="+quote(getApplicationInfo().sourceDir)+" /system/bin/app_process /system/bin org.nfcresearch.qpolllab.QPollWorker "
             +mode+" "+seconds+" "+quote(sessionStop.getAbsolutePath())+" "+quote(new File(getFilesDir(),"session.lock").getAbsolutePath())+(panel?" "+quote(jobFile.getAbsolutePath()):"");
         new Thread(()->{try{
+            if(nativeReader){NativeReaderSession.run(this,mode,seconds,jobFile,sessionStop,new File(getFilesDir(),"session.lock"),nativeQFlag,
+                    (kind,message)->main.post(()->{if(!destroyed)event("QP|"+kind+"|"+message);}));return;}
             if(!rootMode){runBridge(mode,seconds,jobFile,imageFile,sessionStop);return;}
             Process child=new ProcessBuilder("su","-c",command).redirectErrorStream(true).start();
             Thread watchdog=new Thread(()->{try{if(!child.waitFor(mode.equals("refresh")?320:140,TimeUnit.SECONDS)){sessionStop.createNewFile();main.post(()->append("执行超时，已请求停止。"));if(!child.waitFor(10,TimeUnit.SECONDS))child.destroy();}}catch(Exception ignored){}},"root-watchdog");watchdog.setDaemon(true);watchdog.start();

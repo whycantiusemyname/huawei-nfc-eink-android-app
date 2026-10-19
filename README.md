@@ -1,6 +1,6 @@
 # Huawei NFC E-Ink Android App
 
-Android 墨水屏刷新工具，当前测试版本 **v2.10-test1**。通过 Shizuku 或 Root 调用兼容系统的 NXP Q-Poll，再通过 Android ISO-DEP 向 **552×768 四色华为 A0 / A1 墨水屏**传图刷新，使用板内已存驱动。
+Android 墨水屏刷新工具，当前测试版本 **v2.10.1-test1**。优先使用 ROM 暴露的 NXP 原生 Q ReaderMode，由前台 Activity 寻卡；未发现原生入口时保留 Shizuku / Root 旧厂商路径。通过 Android ISO-DEP 向 **552×768 四色华为 A0 / A1 墨水屏**传图刷新，使用板内已存驱动。
 
 ## 功能
 
@@ -12,7 +12,7 @@ Android 墨水屏刷新工具，当前测试版本 **v2.10-test1**。通过 Shiz
 
 ## 使用
 
-1. 开启 NFC，保持手机解锁。启动 Shizuku 后，在“设备与测试”页授权连接；也可选择 Root 后端。
+1. 开启 NFC，保持手机解锁和页面在前台。若页面提示发现 ROM 原生 Q 标志，可直接寻卡，无需 Shizuku / Root；配置检查及旧厂商路径仍需相应授权。
 2. 点击“检查芯片 / NFC”，按需测试 Q-Poll。型号来自系统固件配置，能力以实际控制器响应和通信结果为准。
 3. 在“图像与发送”页手动选择实物屏幕类型 A0 或 A1，再选择图片并调整预览，可先执行“只读检查屏幕”。选择会保存，更换屏幕时需重新核对；D1 无法自动判断 A0 / A1。
 4. 点击“发送当前预览到墨水屏”，核对图片和参数后确认。持续贴合并保持应用在前台，直到操作结束。
@@ -39,8 +39,35 @@ python3 tests/check_fixtures.py build/<protocol-tests-directory>
 APK 和 SHA-256 输出在 `dist/`。首次构建会在 `build/` 生成本地调试签名密钥；密钥、构建缓存和 APK 不纳入 Git。自行构建时需要保留自己的密钥，以支持后续覆盖安装。
 
 ```sh
-adb install -r dist/QPollLab-2.10-test1.apk
+adb install -r dist/QPollLab-2.10.1-test1.apk
 ```
+
+### ARM64 手机 Debian 构建
+
+已有 ARM64 `aapt`、`zipalign`、`apksigner` 时，可显式指定工具及本地文件：
+
+```sh
+export JAVA_HOME=/path/to/jdk
+export ANDROID_JAR=/path/to/android-34/android.jar
+export BUILD_TOOLS_DIR=/usr/lib/android-sdk/build-tools/debian
+export R8_JAR=/path/to/r8.jar
+python3 tests/run_java.py
+python3 build.py
+```
+
+构建脚本不下载依赖；Android 平台文件和 R8 应预先取得并校验。签名密钥留在本机，不上传仓库。不同构建者的本地签名可能无法直接覆盖已有安装，请勿为试用而卸载需要保留数据的版本。
+
+## v2.10.1-test1 原生 Q / Android 15 适配
+
+- 自动检测 ROM 的 `com.nxp.nfc.NxpNfcAdapter.FLAG_READER_NFC_Q`。确认值为 `0x20` 时，前台 Activity 使用 `0xA0`（Q + skip NDEF）寻卡；普通 NFC-A 对照仍使用 `0x81`。这条路径不需要 Shizuku / Root，不发送旧厂商 QTag 开关。
+- 原生路径的识别、只读检查、图像发送和首次连接失败后的重新寻卡共用同一 ReaderMode。继续执行既有屏幕配置校验、同 UID 重连与不重发协议写入的规则。
+- 未发现原生 Q 标志时保留旧厂商路径，后台 ReaderMode 同时兼容四参数与五参数系统接口；不会在 Binder 调用已失败后盲目重试另一签名。
+- 配置名只作为芯片线索；`05` 显示为语法错误，不能据此判定整个硬件不支持 Q-Poll。后台 HAL 日志中的响应仅匹配对应寻卡请求，避免把后续普通寻卡成功误算成 Q-Poll 成功。
+- 原生前台路径无法直接读取 HAL 日志，App 不会把 ReaderMode 正常返回或无卡超时显示为“控制器已接受”。需独立抓包或标签回调提供证据。
+
+本轮在 OnePlus PJZ110 / Android 15、NXP SN220 上完成无卡验证：普通 App UID 检出原生 Q 标志，前台代码发出 `21 03 03 01 71 01`，独立只读观察得到控制器响应 `41 03 01 00`；5 秒结束后恢复普通寻卡，也得到 `00`。测试时未使用旧厂商开关、未刷固件。**没有目标屏，尚未验证屏幕应答、供能或刷新；其他 ROM 的旧路径及五参数接口未做硬件实测。**
+
+详细的适配边界与复核方法见 [docs/native-q-poll.md](docs/native-q-poll.md)。
 
 ## 隐私
 
