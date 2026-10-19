@@ -1,0 +1,55 @@
+name: Publish verified QPollLab test release
+on:
+  push:
+    branches:
+      - release/v2.10.1-test1
+permissions:
+  contents: write
+concurrency:
+  group: release-v2.10.1-test1
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'whycantiusemyname/huawei-nfc-eink-android-app'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: v2.10.1-test1
+      TARGET_COMMIT: 2f6b2d7bc9388c5f69e620cfea15fe187129e71a
+      APK_NAME: QPollLab-2.10.1-test1.apk
+    steps:
+      - name: Fetch the exact release input commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init release-input
+          git -C release-input fetch --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
+          git -C release-input checkout --detach FETCH_HEAD
+          test "$(git -C release-input rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify the locally built signed APK
+        working-directory: release-input/.release/v2.10.1-test1
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check "$APK_NAME.sha256"
+          test "$(sha256sum "$APK_NAME" | cut -d' ' -f1)" = b02341b613d7725508f96919d4c1bf76c183e52396d3499bbc2654bc4b0a81fd
+          unzip -t "$APK_NAME"
+      - name: Upload, verify and publish the prerelease
+        working-directory: release-input/.release/v2.10.1-test1
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing to replace it.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" "$APK_NAME" "$APK_NAME.sha256" \
+            --repo "$GITHUB_REPOSITORY" --target "$TARGET_COMMIT" \
+            --title "QPollLab v2.10.1-test1 · 原生 Q-Poll / Android 15" \
+            --notes-file notes.md --prerelease --draft
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$APK_NAME" --dir downloaded
+          cmp "$APK_NAME" "downloaded/$APK_NAME"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
