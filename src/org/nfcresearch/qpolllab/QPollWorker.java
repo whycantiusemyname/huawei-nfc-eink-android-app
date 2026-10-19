@@ -24,6 +24,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class QPollWorker {
     private static Object service, callback;
     private static Class<?> adapterType;
+    private static Method readerMethod;
+    private static int nativeQFlag;
     private static final Binder token = new Binder();
     private static final AtomicBoolean stopping = new AtomicBoolean();
     private static final AtomicBoolean cleaned = new AtomicBoolean();
@@ -33,7 +35,8 @@ public final class QPollWorker {
     private static Process logcat;
     private static volatile Tag detectedTag;
     private static volatile String qtagRejection;
-    private static volatile boolean qDiscoverySent,qDiscoveryAccepted;
+    private static volatile boolean qDiscoveryAccepted;
+    private static final NciDiscovery.Tracker discovery = new NciDiscovery.Tracker();
     private static String mode;
     private static final Binder callbackBinder = new Binder() {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
@@ -80,9 +83,18 @@ public final class QPollWorker {
     private static void reader(int flags) throws Exception {
         Bundle extras=new Bundle();
         if("refresh".equals(mode)||"identity".equals(mode))extras.putInt("presence",5000);
-        invoke("setReaderMode", new Class<?>[]{IBinder.class, Class.forName("android.nfc.IAppCallback"),
-                int.class, Bundle.class, String.class}, token, callback, flags, extras, android.os.Process.myUid()==2000?"com.android.shell":"android");
+        Object[] args = readerMethod.getParameterTypes().length == 4
+                ? new Object[]{token, callback, flags, extras}
+                : new Object[]{token, callback, flags, extras,
+                    android.os.Process.myUid()==2000?"com.android.shell":"android"};
+        try { readerMethod.invoke(service, args); }
+        catch (InvocationTargetException e) {
+            Throwable cause=e.getCause();
+            if(cause instanceof Exception)throw (Exception)cause;
+            throw e;
+        }
     }
+    private static int scanFlags() { return QPollSupport.flags("standard".equals(mode), nativeQFlag); }
     private static int qtag(int action) throws Exception {
         return (Integer) invoke("sendVendorNciMessage", new Class<?>[]{int.class,int.class,int.class,byte[].class},
                 1, 15, 112, new byte[]{0x31, (byte) action});
@@ -93,6 +105,10 @@ public final class QPollWorker {
         if (binder == null) throw new IllegalStateException("未找到 NFC 服务");
         adapterType = Class.forName("android.nfc.INfcAdapter");
         service = Class.forName("android.nfc.INfcAdapter$Stub").getMethod("asInterface", IBinder.class).invoke(null, binder);
+        readerMethod=ReaderModeCompat.resolve(adapterType,IBinder.class,Class.forName("android.nfc.IAppCallback"),Bundle.class);
+        nativeQFlag=QPollSupport.detectNativeQFlag();
+        emit("BACKEND","ReaderMode "+readerMethod.getParameterTypes().length+" 参数；"+
+                (nativeQFlag!=0?"ROM 原生 Q 标志=0x"+Integer.toHexString(nativeQFlag):"未发现原生 Q 标志，使用旧厂商 QTag 路径"));
         int state = (Integer) invoke("getState", new Class<?>[0]);
         emit("STATE", "执行身份 UID="+android.os.Process.myUid()+"；NFC 状态=" + state + (state == 3 ? "（已开启）" : "（未开启）"));
         if (state != 3) throw new IllegalStateException("请先在系统设置中开启 NFC");
@@ -116,22 +132,28 @@ public final class QPollWorker {
         try {
             String since=new java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS",java.util.Locale.US).format(new java.util.Date());
             logcat = new ProcessBuilder("/system/bin/logcat", "-v", "threadtime", "-T", since,
-                    "NxpNciX:I", "NxpNciR:I", "*:S").redirectErrorStream(true).start();
+                    "NxpNciX:V", "NxpNciR:V", "*:S").redirectErrorStream(true).start();
             Thread monitor = new Thread(() -> {
                 try (BufferedReader in = new BufferedReader(new InputStreamReader(logcat.getInputStream()))) {
                     String line;
                     while ((line = in.readLine()) != null) {
                         int marker = line.indexOf("> ");
                         if (marker < 0) continue;
-                        String packet = line.substring(marker + 2).trim();
-                        if(!cleaned.get()&&line.contains("NxpNciX")&&NciDiscovery.hasQPoll(packet)){qDiscoverySent=true;emit("CAPABILITY","已发出 0x71 Q-Poll 寻卡，等待控制器确认。");}
-                        if(!cleaned.get()&&qDiscoverySent&&line.contains("NxpNciR")&&packet.startsWith("410301")&&packet.length()>=8){
-                            if(packet.substring(6,8).equals("00")){qDiscoveryAccepted=true;emit("CAPABILITY","已确认控制器接受 Q-Poll 寻卡（0x71）；目标屏通信与刷新需单独验证。");}
-                            else emit("CAPABILITY","Q-Poll 寻卡被拒绝，响应状态="+packet.substring(6,8));
+                        String packet = line.substring(marker + 2).trim().replace(" ","").toUpperCase(java.util.Locale.ROOT);
+                        if(!cleaned.get()&&line.contains("NxpNciX")){
+                            discovery.transmitted(packet);
+                            if(NciDiscovery.hasQPoll(packet))emit("CAPABILITY","已发出 0x71 Q-Poll 寻卡，等待控制器确认。");
                         }
-                        if(line.contains("NxpNciR")&&packet.toUpperCase(java.util.Locale.ROOT).startsWith("4F7001")&&packet.length()>=8&&!cleaned.get()){
+                        if(!cleaned.get()&&line.contains("NxpNciR")){
+                            Integer status=discovery.received(packet);
+                            if(status!=null){
+                                if(status==0){qDiscoveryAccepted=true;emit("CAPABILITY","已确认控制器接受 Q-Poll 寻卡（0x71）；目标屏通信与刷新需单独验证。");}
+                                else emit("CAPABILITY","Q-Poll 寻卡响应="+String.format("%02X",status)+"（"+NciDiscovery.statusName(status)+"）");
+                            }
+                        }
+                        if(qtagTouched&&line.contains("NxpNciR")&&packet.startsWith("4F7001")&&packet.length()==8&&!cleaned.get()){
                             String status=packet.substring(6,8);
-                            if(!status.equals("00")){qtagRejection="系统拒绝 QTag，响应状态="+status+"；当前系统未成功开启 Q-Poll。";stopping.set(true);emit("QTAG_REJECTED",qtagRejection);}
+                            if(!status.equals("00")){qtagRejection="旧厂商 QTag 开关响应="+status+"（"+NciDiscovery.statusName(Integer.parseInt(status,16))+"）；此命令失败不等于硬件不支持 Q-Poll。";stopping.set(true);emit("QTAG_REJECTED",qtagRejection);}
                         }
                         if (line.contains("NxpNciX") && packet.startsWith("2103")) emit("RF_TX", packet);
                         if (line.contains("NxpNciR") && (packet.startsWith("4103") || packet.startsWith("6103") || packet.startsWith("6105"))) emit("RF_RX", packet);
@@ -177,22 +199,23 @@ public final class QPollWorker {
                 init();
                 if (args[0].equals("inspect")) {
                     emit("CHIP",ChipInfo.inspect());
-                    adapterType.getMethod("sendVendorNciMessage", int.class, int.class, int.class, byte[].class);
-                    emit("READY", "NXP 测试入口存在，可开始测试（尚未验证空口能力）");
+                    if(nativeQFlag==0)adapterType.getMethod("sendVendorNciMessage", int.class, int.class, int.class, byte[].class);
+                    emit("READY", "寻卡调用入口存在，可开始测试（尚未验证控制器接受或空口通信）");
                     emit("END", "权限检查完成，未发送寻卡命令"); return;
                 }
                 if (stopFile.exists()) { emit("END", "已取消，未启动寻卡"); return; }
                 setupCallback();
                 Runtime.getRuntime().addShutdownHook(new Thread(QPollWorker::cleanup));
                 startLogcat();
-                if (args[0].equals("qtag")||panelOperation) {
+                if ((args[0].equals("qtag")||panelOperation)&&nativeQFlag==0) {
                     qtagTouched = true;
                     int status = qtag(1);
                     emit("QTAG_ON", "启用 QTag，API 状态=" + status + "（只是主机状态）");
                     if (status != 0) throw new IllegalStateException("QTag 启用失败");
                 }
                 readerTouched = true;
-                reader(0x81); // NFC-A + skip NDEF; the NXP extension rewrites discovery to Q_POLL.
+                reader(scanFlags());
+                if(!mode.equals("standard"))emit("CAPABILITY","已请求"+(nativeQFlag!=0?"原生 Q ReaderMode（0x"+Integer.toHexString(scanFlags())+"）":"旧 QTag + NFC-A")+"；调用返回不代表控制器已接受。请保持手机解锁、页面在前台；系统未开放 HAL 日志时无法确认 0x71 响应。");
                 sessionStarted = true;
                 emit("START", args[0] + ":" + seconds);
                 long deadline = SystemClock.elapsedRealtime() + seconds * 1000L;
@@ -216,7 +239,7 @@ public final class QPollWorker {
                         SystemClock.sleep(200);
                         detectedTag=null;tagSeen.set(false);stopping.set(false);
                         if(stopFile.exists())throw new InterruptedException("已停止重新寻卡");
-                        reader(0x81);
+                        reader(scanFlags());
                         emit("START",mode+":"+scanSeconds);
                         long retryDeadline=SystemClock.elapsedRealtime()+scanSeconds*1000L;
                         while(!stopping.get()&&!stopFile.exists()&&SystemClock.elapsedRealtime()<retryDeadline)SystemClock.sleep(20);

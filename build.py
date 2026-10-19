@@ -9,10 +9,12 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 root = Path(__file__).resolve().parent
-sdk = Path(os.environ["ANDROID_HOME"])
+sdk = Path(os.environ["ANDROID_HOME"]) if os.environ.get("ANDROID_HOME") else None
 jdk = Path(os.environ["JAVA_HOME"])
-bt = sdk / "build-tools/34.0.0"
-android = sdk / "platforms/android-34/android.jar"
+if sdk is None and not (os.environ.get("ANDROID_JAR") and os.environ.get("BUILD_TOOLS_DIR") and os.environ.get("R8_JAR")):
+    raise RuntimeError("Set ANDROID_HOME, or ANDROID_JAR + BUILD_TOOLS_DIR + R8_JAR for native ARM64 tools")
+bt = Path(os.environ["BUILD_TOOLS_DIR"]) if os.environ.get("BUILD_TOOLS_DIR") else sdk / "build-tools/34.0.0"
+android = Path(os.environ["ANDROID_JAR"]) if os.environ.get("ANDROID_JAR") else sdk / "platforms/android-34/android.jar"
 build_root = root / "build"
 build_root.mkdir(parents=True, exist_ok=True)
 build = Path(tempfile.mkdtemp(prefix="v2-", dir=build_root))
@@ -35,7 +37,8 @@ def run(*args, cwd=root):
 run(jdk / "bin/javac", "-encoding", "UTF-8", "--release", "8",
     "-classpath", os.pathsep.join(str(p) for p in [android, *libraries]), "-d", build / "classes", *sorted((root / "src").rglob("*.java")))
 run(jdk / "bin/jar", "cf", build / "classes.jar", "-C", build / "classes", ".")
-run(bt / "d8", "--min-api", "26", "--lib", android, "--output", build / "dex", build / "classes.jar", *libraries)
+d8 = [jdk / "bin/java", "-cp", os.environ["R8_JAR"], "com.android.tools.r8.D8"] if os.environ.get("R8_JAR") else [bt / "d8"]
+run(*d8, "--min-api", "26", "--lib", android, "--output", build / "dex", build / "classes.jar", *libraries)
 run(bt / "aapt", "package", "-f", "-M", root / "AndroidManifest.xml", "-S", root / "res",
     "-A", root / "assets", "-I", android, "-F", build / "unsigned.apk")
 with zipfile.ZipFile(build / "unsigned.apk", "a", zipfile.ZIP_DEFLATED) as archive:
